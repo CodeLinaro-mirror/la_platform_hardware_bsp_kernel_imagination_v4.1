@@ -44,7 +44,7 @@ static struct pistachio_gate pistachio_gates[] __initdata = {
 	GATE(CLK_AUX_ADC_INTERNAL, "aux_adc_internal", "sys_internal_div",
 	     0x104, 22),
 	GATE(CLK_AUX_ADC, "aux_adc", "aux_adc_div", 0x104, 23),
-	GATE(CLK_SD_HOST, "sd_host", "sd_host_div", 0x104, 24),
+	GATE(CLK_SD_HOST, "sd_host", "sd_host_div4", 0x104, 24),
 	GATE(CLK_BT, "bt", "bt_div", 0x104, 25),
 	GATE(CLK_BT_DIV4, "bt_div4", "bt_div4_div", 0x104, 26),
 	GATE(CLK_BT_DIV8, "bt_div8", "bt_div8_div", 0x104, 27),
@@ -54,6 +54,7 @@ static struct pistachio_gate pistachio_gates[] __initdata = {
 static struct pistachio_fixed_factor pistachio_ffs[] __initdata = {
 	FIXED_FACTOR(CLK_WIFI_DIV4, "wifi_div4", "wifi_pll", 4),
 	FIXED_FACTOR(CLK_WIFI_DIV8, "wifi_div8", "wifi_pll", 8),
+	FIXED_FACTOR(CLK_SDHOST_DIV4, "sd_host_div4", "sd_host_div", 4),
 };
 
 static struct pistachio_div pistachio_divs[] __initdata = {
@@ -286,10 +287,10 @@ static struct pistachio_div pistachio_periph_divs[] __initdata = {
 	DIV(PERIPH_CLK_ROM_DIV, "rom_div", "periph_sys", 0x10c, 7),
 	DIV(PERIPH_CLK_COUNTER_FAST_DIV, "counter_fast_div", "periph_sys",
 	    0x110, 7),
-	DIV(PERIPH_CLK_COUNTER_SLOW_PRE_DIV, "counter_slow_pre_div",
-	    "periph_sys", 0x114, 7),
-	DIV(PERIPH_CLK_COUNTER_SLOW_DIV, "counter_slow_div",
-	    "counter_slow_pre_div", 0x118, 7),
+	DIV_F(PERIPH_CLK_COUNTER_SLOW_PRE_DIV, "counter_slow_pre_div",
+	    "periph_sys", 0x114, 7, 0, CLK_DIVIDER_ROUND_CLOSEST),
+	DIV_F(PERIPH_CLK_COUNTER_SLOW_DIV, "counter_slow_div",
+	    "counter_slow_pre_div", 0x118, 7, 0, CLK_DIVIDER_ROUND_CLOSEST),
 	DIV_F(PERIPH_CLK_IR_PRE_DIV, "ir_pre_div", "periph_sys", 0x11c, 7,
 	      0, CLK_DIVIDER_ROUND_CLOSEST),
 	DIV_F(PERIPH_CLK_IR_DIV, "ir_div", "ir_pre_div", 0x120, 7,

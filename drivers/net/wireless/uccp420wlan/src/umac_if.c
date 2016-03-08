@@ -502,10 +502,14 @@ static int uccp420wlan_send_cmd(unsigned char *buf,
 	unsigned long irq_flags;
 
 	rcu_read_lock();
+
 	p = (struct lmac_if_data *)(rcu_dereference(lmac_if));
 
 	if (!p) {
+		pr_err("%s: Unable to retrieve lmac_if\n", __func__);
+#ifdef DRIVER_DEBUG
 		WARN_ON(1);
+#endif
 		rcu_read_unlock();
 		return -1;
 	}
@@ -581,7 +585,8 @@ int uccp420wlan_prog_reset(unsigned int reset_type, unsigned int lmac_mode)
 		reset.lmac_mode = lmac_mode;
 		reset.antenna_sel = dev->params->antenna_sel;
 
-		if (dev->params->production_test == 0) {
+		if (dev->params->production_test == 0 &&
+			dev->params->bypass_vpd == 0) {
 			memcpy(reset.rf_params, dev->params->rf_params_vpd,
 			       RF_PARAMS_SIZE);
 		} else {
@@ -697,6 +702,10 @@ int uccp420wlan_proc_tx(void)
 		tx_cmd.bcc_or_ldpc = 0;
 		tx_cmd.stbc_enabled = 0;
 		tx_cmd.num_rates++;
+	} else {
+		WARN_ON(1);
+		rcu_read_unlock();
+		return -90;
 	}
 
 	nbuf = alloc_skb(sizeof(struct cmd_tx_ctrl) +
@@ -839,15 +848,17 @@ int uccp420wlan_prog_vht_bform(unsigned int vht_beamform_status,
 
 int uccp420wlan_prog_roc(unsigned int roc_ctrl,
 			 unsigned int roc_channel,
-			 unsigned int roc_duration)
+			 unsigned int roc_duration,
+			 unsigned int roc_type)
 {
 	struct cmd_roc cmd_roc;
 
 	memset(&cmd_roc, 0, sizeof(struct cmd_roc));
 
-	cmd_roc.roc_ctrl	= roc_ctrl;
+	cmd_roc.roc_ctrl = roc_ctrl;
 	cmd_roc.roc_channel	= roc_channel;
-	cmd_roc.roc_duration	= roc_duration;
+	cmd_roc.roc_duration = roc_duration;
+	cmd_roc.roc_type = roc_type;
 
 	return uccp420wlan_send_cmd((unsigned char *) &cmd_roc,
 			sizeof(struct cmd_roc), UMAC_CMD_ROC_CTRL);
@@ -1302,6 +1313,8 @@ int uccp420wlan_prog_channel(unsigned int prim_ch,
 	dev->cur_chan.freq_band = freq_band;
 	dev->chan_prog_done = 0;
 
+	rcu_read_unlock();
+
 	return uccp420wlan_send_cmd((unsigned char *) &channel,
 				    sizeof(struct cmd_channel),
 				    UMAC_CMD_CHANNEL);
@@ -1404,6 +1417,7 @@ int uccp420wlan_prog_tx(unsigned int queue,
 	unsigned long irq_flags, tx_irq_flags;
 #ifdef MULTI_CHAN_SUPPORT
 	struct tx_pkt_info *pkt_info = NULL;
+	struct tx_config *tx;
 #endif
 
 	memset(&tx_cmd, 0, sizeof(struct cmd_tx_ctrl));
@@ -1419,6 +1433,7 @@ int uccp420wlan_prog_tx(unsigned int queue,
 
 	dev = p->context;
 	spin_lock_irqsave(&dev->tx.lock, tx_irq_flags);
+	tx = &dev->tx;
 #ifdef MULTI_CHAN_SUPPORT
 	txq = &dev->tx.pkt_info[curr_chanctx_idx][descriptor_id].pkt;
 	pkt_info = &dev->tx.pkt_info[curr_chanctx_idx][descriptor_id];
@@ -1447,19 +1462,32 @@ int uccp420wlan_prog_tx(unsigned int queue,
 	if ((ieee80211_is_data(fc) ||
 	     ieee80211_is_data_qos(fc))
 	    && ieee80211_has_protected(fc)) {
-		DEBUG_LOG("%s:cipher: %d,icv_len: %d,iv_len: %d,keylen:%d\n",
-			     __func__,
-			     tx_info_first->control.hw_key->cipher,
-			     tx_info_first->control.hw_key->icv_len,
-			     tx_info_first->control.hw_key->iv_len,
-			     tx_info_first->control.hw_key->keylen);
-
-		/* iv_len is always the header ahd
-		 * icv_len is always the trailer
-		 * include only iv_len
+		/* hw_key == NULL: Encrypted in SW (injected frames)
+		 * iv_len = 0: treat as SW encryption.
 		 */
-		hdrlen += tx_info_first->control.hw_key->iv_len;
+		if (tx_info_first->control.hw_key == NULL ||
+		    !tx_info_first->control.hw_key->iv_len) {
+			DEBUG_LOG("%s: hw_key is %s and iv_len: 0\n",
+				  __func__,
+				  tx_info_first->control.hw_key?"valid":"NULL");
+			tx_cmd.encrypt = ENCRYPT_DISABLE;
+		 } else {
+			DEBUG_LOG("%s: cipher: %d, icv: %d, iv: %d, key: %d\n",
+				  __func__,
+				  tx_info_first->control.hw_key->cipher,
+				  tx_info_first->control.hw_key->icv_len,
+				  tx_info_first->control.hw_key->iv_len,
+				  tx_info_first->control.hw_key->keylen);
+			/* iv_len is always the header and icv_len is always
+			 * the trailer include only iv_len
+			 */
+			hdrlen += tx_info_first->control.hw_key->iv_len;
+			tx_cmd.encrypt = ENCRYPT_ENABLE;
+		}
 	}
+
+	if (tx_info_first->flags & IEEE80211_TX_CTL_TX_OFFCHAN)
+		tx_cmd.tx_flags |= (1 << UMAC_TX_FLAG_OFFCHAN_FRM);
 
 	/* For injected frames (wlantest) hw_key is not set,as PMF uses
 	 * CCMP always so hardcode this to CCMP IV LEN 8.
@@ -1468,7 +1496,7 @@ int uccp420wlan_prog_tx(unsigned int queue,
 	if (ieee80211_is_unicast_robust_mgmt_frame(skb_first) &&
 	    ieee80211_has_protected(fc)) {
 		hdrlen += 8;
-		tx_cmd.force_encrypt = 1;
+		tx_cmd.encrypt = ENCRYPT_ENABLE;
 	}
 
 	/* separate in to up to TSF and From TSF*/
@@ -1492,6 +1520,14 @@ int uccp420wlan_prog_tx(unsigned int queue,
 	tx_cmd.num_frames_per_desc = skb_queue_len(txq);
 	tx_cmd.pkt_gram_payload_len = hdrlen;
 	tx_cmd.aggregate_mpdu = AMPDU_AGGR_DISABLED;
+
+#ifdef MULTI_CHAN_SUPPORT
+	dev->tx.pkt_info[curr_chanctx_idx][descriptor_id].vif_index = vif_index;
+	dev->tx.pkt_info[curr_chanctx_idx][descriptor_id].queue = queue;
+#else
+	dev->tx.pkt_info[descriptor_id].vif_index = vif_index;
+	dev->tx.pkt_info[descriptor_id].queue = queue;
+#endif
 
 	uvif = (struct umac_vif *) (tx_info_first->control.vif->drv_priv);
 
@@ -1541,6 +1577,10 @@ int uccp420wlan_prog_tx(unsigned int queue,
 		  tx_cmd.rate_retries[2],
 		  tx_cmd.rate_retries[3]);
 
+#ifdef MULTI_CHAN_SUPPORT
+	tx->desc_chan_map[descriptor_id] = curr_chanctx_idx;
+#endif
+
 	skb_queue_walk_safe(txq, skb, tmp) {
 		if (!skb || (pkt > tx_cmd.num_frames_per_desc))
 			break;
@@ -1566,11 +1606,8 @@ int uccp420wlan_prog_tx(unsigned int queue,
 #ifdef MULTI_CHAN_SUPPORT
 		dev->tx.pkt_info[curr_chanctx_idx][descriptor_id].hdr_len =
 			hdrlen;
-		dev->tx.pkt_info[curr_chanctx_idx][descriptor_id].queue =
-			queue;
 #else
 		dev->tx.pkt_info[descriptor_id].hdr_len = hdrlen;
-		dev->tx.pkt_info[descriptor_id].queue = queue;
 #endif
 
 		/* Complete packet length */
@@ -2018,6 +2055,19 @@ int uccp420wlan_prog_aux_adc_chain(unsigned int chain_id)
 				    UMAC_CMD_AUX_ADC_CHAIN_SEL);
 }
 
+int uccp420wlan_prog_cont_tx(int val)
+{
+	struct cmd_cont_tx status;
+
+	memset(&status, 0, sizeof(struct cmd_cont_tx));
+	status.op = val;
+
+	return uccp420wlan_send_cmd((unsigned char *)&status,
+				    sizeof(struct cmd_cont_tx),
+				    UMAC_CMD_CONT_TX);
+}
+
+
 
 int uccp420wlan_prog_mib_stats(void)
 {
@@ -2280,13 +2330,37 @@ int uccp420wlan_msg_handler(void *nbuff,
 		uccp420wlan_ch_prog_complete(event,
 			(struct umac_event_ch_prog_complete *)buff, p->context);
 	} else if (event == UMAC_EVENT_RF_CALIB_DATA) {
-		struct umac_event_rf_calib_data  *rf_data = (void *) buff;
+		struct umac_event_rf_calib_data  *rf_data = (void *)buff;
 
 		uccp420wlan_rf_calib_data(rf_data, p->context);
+	} else if (event == UMAC_EVENT_ROC_STATUS) {
+		struct umac_event_roc_status *roc_status = (void *)buff;
+		struct delayed_work *work = NULL;
+
+		DEBUG_LOG("%s-UMACIF: ROC status is %d\n",
+			  dev->name,
+			  roc_status->roc_status);
+
+		switch (roc_status->roc_status) {
+		case UMAC_ROC_STAT_STARTED:
+			if (dev->roc_params.roc_in_progress == 0) {
+				dev->roc_params.roc_in_progress = 1;
+				ieee80211_ready_on_channel(dev->hw);
+				DEBUG_LOG("%s-UMACIF: ROC READY..\n",
+					  dev->name);
+			}
+			break;
+		case UMAC_ROC_STAT_DONE:
+		case UMAC_ROC_STAT_STOPPED:
+			if (dev->roc_params.roc_in_progress == 1) {
+				work = &dev->roc_complete_work;
+				ieee80211_queue_delayed_work(dev->hw,
+							     work,
+							     0);
+			}
+			break;
+		}
 #ifdef MULTI_CHAN_SUPPORT
-	/* SDK: Need to see if this will work in tasklet context (due to
-	 * scheduling latencies)
-	 */
 	} else if (event == UMAC_EVENT_CHAN_SWITCH) {
 		uccp420wlan_proc_ch_sw_event((void *)buff,
 					     p->context);

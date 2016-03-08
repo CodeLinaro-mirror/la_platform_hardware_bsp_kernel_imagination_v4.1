@@ -10,6 +10,7 @@
 /dts-v1/;
 
 #include "pistachio_bub_audio_no_daughterboard_example.dtsi"
+#include "pistachio_board_uboot.dtsi"
 
 / {
 	model = "IMG Pistachio BuB";
@@ -58,7 +59,7 @@
 		reg = <1>;
 		spi-max-frequency = <50000000>;
 		nand-on-flash-bbt;
-		spi-rx-bus-width = <4>;
+		spi-rx-bus-width = <2>;
 		#address-cells = <1>;
 		#size-cells = <1>;
 		linux,mtd-name = "spi-nand";
